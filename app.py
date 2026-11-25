@@ -1,6 +1,8 @@
 """Mosra Energy mine weather workspace. Run: streamlit run app.py."""
 from __future__ import annotations
 
+import hashlib
+import hmac
 import html
 import json
 import os
@@ -57,14 +59,67 @@ def local_time(value, site, pattern="%d %b, %H:%M"):
     return parse_time(value).astimezone(ZoneInfo(site["timezone"])).strftime(pattern)
 
 
-def secret(name):
+def secret(name, default=""):
     value = os.environ.get(name, "")
     if value:
         return value
     try:
-        return str(st.secrets.get(name, ""))
+        return str(st.secrets.get(name, default))
     except (FileNotFoundError, st.errors.StreamlitSecretNotFoundError):
-        return ""
+        return default
+
+
+def _auth_token(password):
+    return hashlib.sha256(f"mosra-weather-lock:{password}".encode()).hexdigest()[:24]
+
+
+def check_password():
+    expected = secret("WEATHER_PASSWORD", "MosraOps#Weather")
+    expected_token = _auth_token(expected)
+
+    if st.session_state.get("weather_authenticated", False):
+        return True
+
+    # Auto-unlock if a valid "Keep me signed in" token is present in the URL
+    if hmac.compare_digest(st.query_params.get("auth", ""), expected_token):
+        st.session_state["weather_authenticated"] = True
+        return True
+
+    # Hide sidebar while locked
+    st.markdown('<style>[data-testid="stSidebar"]{display:none}</style>', unsafe_allow_html=True)
+
+    _, col, _ = st.columns([1, 1.15, 1])
+    with col:
+        st.markdown("""
+        <div style="background:#142238;border:1px solid #293b54;border-top:3px solid #2dd4bf;
+                    border-radius:16px;padding:24px;margin-top:40px;margin-bottom:16px;text-align:center;">
+          <div class="eyebrow">MOSRA ENERGY</div>
+          <h3 style="color:#f1f5f9;margin:8px 0 4px;">🔒 Mine Weather</h3>
+          <p style="color:#9db0c8;font-size:.88rem;margin:0;">
+            Authorized personnel only. Enter access password to continue.
+          </p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        with st.form("weather_login_form"):
+            pwd = st.text_input("Password", type="password", placeholder="Enter password...", autocomplete="current-password")
+            remember = st.checkbox("Keep me signed in on this device (adds a token to URL for bookmarking)", value=True)
+            submitted = st.form_submit_button("Unlock Workspace", type="primary", use_container_width=True)
+
+        if submitted:
+            if hmac.compare_digest(pwd, expected):
+                st.session_state["weather_authenticated"] = True
+                if remember:
+                    st.query_params["auth"] = expected_token
+                st.rerun()
+            else:
+                st.error("Incorrect password. Please try again.")
+
+    return False
+
+
+if not check_password():
+    st.stop()
 
 
 def badge(level):
@@ -150,6 +205,11 @@ with st.sidebar:
     if provider == "Open-Meteo":
         st.caption("Uses the commercial customer endpoint. Requires an Open-Meteo subscription.")
     refresh_minutes = st.selectbox("Automatic refresh", [0, 5, 10, 15], index=2, format_func=lambda n: "Off" if n == 0 else f"Every {n} minutes")
+    st.divider()
+    if st.button("🔒 Lock workspace", use_container_width=True):
+        st.session_state["weather_authenticated"] = False
+        st.query_params.pop("auth", None)
+        st.rerun()
 
 
 def render_overview(bundle, site, limits, rows):
